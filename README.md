@@ -220,17 +220,3 @@ The system includes comprehensive test coverage:
 - Advanced performance optimization
 - Accessibility compliance (WCAG)
 
-## 📞 Support
-
-For issues or questions:
-1. Check backend logs: `tail -f /var/log/supervisor/backend.*.log`
-2. Check frontend logs: `tail -f /var/log/supervisor/frontend.*.log`
-3. Restart services: `sudo supervisorctl restart backend frontend`
-
-## 📄 License
-
-Educational prototype - 2025
-
----
-
-**Built with ❤️ using Emergent AI**
