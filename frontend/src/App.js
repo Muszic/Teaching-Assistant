@@ -32,6 +32,8 @@ function App() {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     setUser(null);
+    // Force navigation to landing page
+    window.location.href = "/";
   };
 
   if (loading) {
