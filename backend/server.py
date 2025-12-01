@@ -1,10 +1,12 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, File, UploadFile, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+import aiosqlite
 import os
 import logging
+import shutil
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from typing import List, Optional
@@ -16,10 +18,10 @@ import jwt
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# Database
+DB_NAME = "tg_tas.db"
+UPLOADS_DIR = ROOT_DIR / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
 
 # Security
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -29,13 +31,24 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 
 app = FastAPI()
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 api_router = APIRouter(prefix="/api")
 
 # Pydantic Models
 class UserBase(BaseModel):
     email: EmailStr
     name: str
-    role: str  # "teacher" or "student"
+    role: str
 
 class UserRegister(UserBase):
     password: str
@@ -43,6 +56,10 @@ class UserRegister(UserBase):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    password: Optional[str] = None
 
 class User(UserBase):
     model_config = ConfigDict(extra="ignore")
@@ -82,21 +99,23 @@ class AssignmentCreate(BaseModel):
 class Assignment(AssignmentCreate):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    file_url: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class SubmissionCreate(BaseModel):
-    file_url: str
+    pass
 
-class Submission(SubmissionCreate):
+class Submission(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     assignment_id: str
     student_id: str
     student_name: str
+    file_url: str
     submitted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     grade: Optional[int] = None
     feedback: Optional[str] = None
-    status: str = "submitted"  # "submitted", "graded"
+    status: str = "submitted"
 
 class GradeSubmission(BaseModel):
     grade: int
@@ -122,62 +141,138 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
         
-        user = await db.users.find_one({"id": user_id}, {"_id": 0})
+        async with aiosqlite.connect(DB_NAME) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM users WHERE id = ?", (user_id,)) as cursor:
+                user = await cursor.fetchone()
+                
         if user is None:
             raise HTTPException(status_code=401, detail="User not found")
         
-        if isinstance(user.get('created_at'), str):
-            user['created_at'] = datetime.fromisoformat(user['created_at'])
+        user_dict = dict(user)
+        if isinstance(user_dict.get('created_at'), str):
+            user_dict['created_at'] = datetime.fromisoformat(user_dict['created_at'])
         
-        return User(**user)
+        return User(**user_dict)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+# Init DB
+@app.on_event("startup")
+async def startup():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT UNIQUE,
+                name TEXT,
+                role TEXT,
+                password TEXT,
+                created_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS courses (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                description TEXT,
+                teacher_id TEXT,
+                teacher_name TEXT,
+                created_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS enrollments (
+                id TEXT PRIMARY KEY,
+                student_id TEXT,
+                course_id TEXT,
+                enrolled_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS assignments (
+                id TEXT PRIMARY KEY,
+                course_id TEXT,
+                title TEXT,
+                description TEXT,
+                due_date TEXT,
+                total_points INTEGER,
+                file_url TEXT,
+                created_at TEXT
+            )
+        """)
+        # Migration for existing assignments table
+        try:
+            await db.execute("ALTER TABLE assignments ADD COLUMN file_url TEXT")
+        except Exception:
+            pass
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS submissions (
+                id TEXT PRIMARY KEY,
+                assignment_id TEXT,
+                student_id TEXT,
+                student_name TEXT,
+                file_url TEXT,
+                submitted_at TEXT,
+                grade INTEGER,
+                feedback TEXT,
+                status TEXT
+            )
+        """)
+        await db.commit()
+
 # Auth Routes
 @api_router.post("/auth/register", response_model=Token)
 async def register(user_input: UserRegister):
-    # Check if user exists
-    existing_user = await db.users.find_one({"email": user_input.email})
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # Validate role
-    if user_input.role not in ["teacher", "student"]:
-        raise HTTPException(status_code=400, detail="Role must be 'teacher' or 'student'")
-    
-    # Create user
-    user_obj = User(
-        email=user_input.email,
-        name=user_input.name,
-        role=user_input.role
-    )
-    
-    doc = user_obj.model_dump()
-    doc['password'] = hash_password(user_input.password)
-    doc['created_at'] = doc['created_at'].isoformat()
-    
-    await db.users.insert_one(doc)
-    
-    # Create token
-    access_token = create_access_token(user_obj.id, user_obj.email, user_obj.role)
-    
-    return Token(access_token=access_token, token_type="bearer", user=user_obj)
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM users WHERE email = ?", (user_input.email,)) as cursor:
+            existing_user = await cursor.fetchone()
+            
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered")
+        
+        if user_input.role not in ["teacher", "student"]:
+            raise HTTPException(status_code=400, detail="Role must be 'teacher' or 'student'")
+        
+        user_obj = User(
+            email=user_input.email,
+            name=user_input.name,
+            role=user_input.role
+        )
+        
+        hashed_pw = hash_password(user_input.password)
+        
+        await db.execute(
+            "INSERT INTO users (id, email, name, role, password, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_obj.id, user_obj.email, user_obj.name, user_obj.role, hashed_pw, user_obj.created_at.isoformat())
+        )
+        await db.commit()
+        
+        access_token = create_access_token(user_obj.id, user_obj.email, user_obj.role)
+        return Token(access_token=access_token, token_type="bearer", user=user_obj)
 
 @api_router.post("/auth/login", response_model=Token)
 async def login(credentials: UserLogin):
-    user = await db.users.find_one({"email": credentials.email}, {"_id": 0})
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM users WHERE email = ?", (credentials.email,)) as cursor:
+            user = await cursor.fetchone()
+            
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    if not verify_password(credentials.password, user['password']):
+    user_dict = dict(user)
+    if not verify_password(credentials.password, user_dict['password']):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    if isinstance(user.get('created_at'), str):
-        user['created_at'] = datetime.fromisoformat(user['created_at'])
+    if isinstance(user_dict.get('created_at'), str):
+        user_dict['created_at'] = datetime.fromisoformat(user_dict['created_at'])
     
-    user_obj = User(**{k: v for k, v in user.items() if k != 'password'})
+    user_obj = User(**{k: v for k, v in user_dict.items() if k != 'password'})
     access_token = create_access_token(user_obj.id, user_obj.email, user_obj.role)
     
     return Token(access_token=access_token, token_type="bearer", user=user_obj)
@@ -185,6 +280,40 @@ async def login(credentials: UserLogin):
 @api_router.get("/auth/me", response_model=User)
 async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+@api_router.put("/auth/profile", response_model=User)
+async def update_profile(user_update: UserUpdate, current_user: User = Depends(get_current_user)):
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        
+        updates = []
+        params = []
+        
+        if user_update.name:
+            updates.append("name = ?")
+            params.append(user_update.name)
+            
+        if user_update.password:
+            hashed_pw = hash_password(user_update.password)
+            updates.append("password = ?")
+            params.append(hashed_pw)
+            
+        if not updates:
+            return current_user
+            
+        params.append(current_user.id)
+        
+        await db.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", tuple(params))
+        await db.commit()
+        
+        async with db.execute("SELECT * FROM users WHERE id = ?", (current_user.id,)) as cursor:
+            updated_user = await cursor.fetchone()
+            
+    user_dict = dict(updated_user)
+    if isinstance(user_dict.get('created_at'), str):
+        user_dict['created_at'] = datetime.fromisoformat(user_dict['created_at'])
+        
+    return User(**user_dict)
 
 # Course Routes
 @api_router.post("/courses", response_model=Course)
@@ -198,60 +327,82 @@ async def create_course(course_input: CourseCreate, current_user: User = Depends
         teacher_name=current_user.name
     )
     
-    doc = course_obj.model_dump()
-    doc['created_at'] = doc['created_at'].isoformat()
-    
-    await db.courses.insert_one(doc)
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO courses (id, title, description, teacher_id, teacher_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (course_obj.id, course_obj.title, course_obj.description, course_obj.teacher_id, course_obj.teacher_name, course_obj.created_at.isoformat())
+        )
+        await db.commit()
+        
     return course_obj
 
 @api_router.get("/courses", response_model=List[Course])
 async def get_courses(current_user: User = Depends(get_current_user)):
-    if current_user.role == "teacher":
-        courses = await db.courses.find({"teacher_id": current_user.id}, {"_id": 0}).to_list(1000)
-    else:
-        # Get all courses for students
-        courses = await db.courses.find({}, {"_id": 0}).to_list(1000)
-    
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        if current_user.role == "teacher":
+            async with db.execute("SELECT * FROM courses WHERE teacher_id = ?", (current_user.id,)) as cursor:
+                courses = await cursor.fetchall()
+        else:
+            async with db.execute("SELECT * FROM courses") as cursor:
+                courses = await cursor.fetchall()
+                
+    result = []
     for course in courses:
-        if isinstance(course.get('created_at'), str):
-            course['created_at'] = datetime.fromisoformat(course['created_at'])
+        c = dict(course)
+        if isinstance(c.get('created_at'), str):
+            c['created_at'] = datetime.fromisoformat(c['created_at'])
+        result.append(Course(**c))
     
-    return courses
+    return result
 
 @api_router.get("/courses/{course_id}", response_model=Course)
 async def get_course(course_id: str, current_user: User = Depends(get_current_user)):
-    course = await db.courses.find_one({"id": course_id}, {"_id": 0})
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)) as cursor:
+            course = await cursor.fetchone()
+            
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
     
-    if isinstance(course.get('created_at'), str):
-        course['created_at'] = datetime.fromisoformat(course['created_at'])
+    c = dict(course)
+    if isinstance(c.get('created_at'), str):
+        c['created_at'] = datetime.fromisoformat(c['created_at'])
     
-    return Course(**course)
+    return Course(**c)
 
 @api_router.post("/courses/{course_id}/enroll")
 async def enroll_in_course(course_id: str, current_user: User = Depends(get_current_user)):
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can enroll in courses")
     
-    course = await db.courses.find_one({"id": course_id})
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-    
-    # Check if already enrolled
-    existing = await db.enrollments.find_one({"student_id": current_user.id, "course_id": course_id})
-    if existing:
-        raise HTTPException(status_code=400, detail="Already enrolled in this course")
-    
-    enrollment_obj = Enrollment(
-        student_id=current_user.id,
-        course_id=course_id
-    )
-    
-    doc = enrollment_obj.model_dump()
-    doc['enrolled_at'] = doc['enrolled_at'].isoformat()
-    
-    await db.enrollments.insert_one(doc)
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        
+        # Check course exists
+        async with db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)) as cursor:
+            course = await cursor.fetchone()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Check if already enrolled
+        async with db.execute("SELECT * FROM enrollments WHERE student_id = ? AND course_id = ?", (current_user.id, course_id)) as cursor:
+            existing = await cursor.fetchone()
+        if existing:
+            raise HTTPException(status_code=400, detail="Already enrolled in this course")
+        
+        enrollment_obj = Enrollment(
+            student_id=current_user.id,
+            course_id=course_id
+        )
+        
+        await db.execute(
+            "INSERT INTO enrollments (id, student_id, course_id, enrolled_at) VALUES (?, ?, ?, ?)",
+            (enrollment_obj.id, enrollment_obj.student_id, enrollment_obj.course_id, enrollment_obj.enrolled_at.isoformat())
+        )
+        await db.commit()
+        
     return {"message": "Successfully enrolled in course"}
 
 @api_router.get("/courses/enrolled/my")
@@ -259,164 +410,354 @@ async def get_enrolled_courses(current_user: User = Depends(get_current_user)):
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students have enrolled courses")
     
-    enrollments = await db.enrollments.find({"student_id": current_user.id}, {"_id": 0}).to_list(1000)
-    course_ids = [e['course_id'] for e in enrollments]
-    
-    courses = await db.courses.find({"id": {"$in": course_ids}}, {"_id": 0}).to_list(1000)
-    
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT c.* FROM courses c
+            JOIN enrollments e ON c.id = e.course_id
+            WHERE e.student_id = ?
+        """, (current_user.id,)) as cursor:
+            courses = await cursor.fetchall()
+            
+    result = []
     for course in courses:
-        if isinstance(course.get('created_at'), str):
-            course['created_at'] = datetime.fromisoformat(course['created_at'])
+        c = dict(course)
+        if isinstance(c.get('created_at'), str):
+            c['created_at'] = datetime.fromisoformat(c['created_at'])
+        result.append(Course(**c))
     
-    return courses
+    return result
 
 # Assignment Routes
 @api_router.post("/assignments", response_model=Assignment)
-async def create_assignment(assignment_input: AssignmentCreate, current_user: User = Depends(get_current_user)):
+async def create_assignment(
+    course_id: str = Form(...),
+    title: str = Form(...),
+    description: str = Form(...),
+    due_date: str = Form(...),
+    total_points: int = Form(...),
+    file: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_user)
+):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Only teachers can create assignments")
     
-    # Verify course belongs to teacher
-    course = await db.courses.find_one({"id": assignment_input.course_id, "teacher_id": current_user.id})
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found or you don't have permission")
-    
-    assignment_obj = Assignment(**assignment_input.model_dump())
-    
-    doc = assignment_obj.model_dump()
-    doc['created_at'] = doc['created_at'].isoformat()
-    
-    await db.assignments.insert_one(doc)
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        # Verify course belongs to teacher
+        async with db.execute("SELECT * FROM courses WHERE id = ? AND teacher_id = ?", (course_id, current_user.id)) as cursor:
+            course = await cursor.fetchone()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found or you don't have permission")
+        
+        file_url = None
+        if file:
+            file_extension = Path(file.filename).suffix
+            new_filename = f"assignment_{uuid.uuid4()}{file_extension}"
+            file_path = UPLOADS_DIR / new_filename
+            
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            file_url = f"/uploads/{new_filename}"
+
+        assignment_obj = Assignment(
+            course_id=course_id,
+            title=title,
+            description=description,
+            due_date=due_date,
+            total_points=total_points,
+            file_url=file_url
+        )
+        
+        await db.execute(
+            "INSERT INTO assignments (id, course_id, title, description, due_date, total_points, file_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (assignment_obj.id, assignment_obj.course_id, assignment_obj.title, assignment_obj.description, assignment_obj.due_date, assignment_obj.total_points, assignment_obj.file_url, assignment_obj.created_at.isoformat())
+        )
+        await db.commit()
+        
     return assignment_obj
 
 @api_router.get("/courses/{course_id}/assignments", response_model=List[Assignment])
 async def get_course_assignments(course_id: str, current_user: User = Depends(get_current_user)):
-    # Verify access to course
-    course = await db.courses.find_one({"id": course_id})
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-    
-    if current_user.role == "student":
-        # Verify student is enrolled
-        enrollment = await db.enrollments.find_one({"student_id": current_user.id, "course_id": course_id})
-        if not enrollment:
-            raise HTTPException(status_code=403, detail="Not enrolled in this course")
-    elif current_user.role == "teacher" and course['teacher_id'] != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your course")
-    
-    assignments = await db.assignments.find({"course_id": course_id}, {"_id": 0}).to_list(1000)
-    
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        
+        async with db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)) as cursor:
+            course = await cursor.fetchone()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        course_dict = dict(course)
+        
+        if current_user.role == "student":
+            async with db.execute("SELECT * FROM enrollments WHERE student_id = ? AND course_id = ?", (current_user.id, course_id)) as cursor:
+                enrollment = await cursor.fetchone()
+            if not enrollment:
+                raise HTTPException(status_code=403, detail="Not enrolled in this course")
+        elif current_user.role == "teacher" and course_dict['teacher_id'] != current_user.id:
+            raise HTTPException(status_code=403, detail="Not your course")
+        
+        async with db.execute("SELECT * FROM assignments WHERE course_id = ?", (course_id,)) as cursor:
+            assignments = await cursor.fetchall()
+            
+    result = []
     for assignment in assignments:
-        if isinstance(assignment.get('created_at'), str):
-            assignment['created_at'] = datetime.fromisoformat(assignment['created_at'])
+        a = dict(assignment)
+        if isinstance(a.get('created_at'), str):
+            a['created_at'] = datetime.fromisoformat(a['created_at'])
+        result.append(Assignment(**a))
     
-    return assignments
+    return result
 
 # Submission Routes
 @api_router.post("/assignments/{assignment_id}/submit", response_model=Submission)
-async def submit_assignment(assignment_id: str, submission_input: SubmissionCreate, current_user: User = Depends(get_current_user)):
+async def submit_assignment(
+    assignment_id: str, 
+    file: UploadFile = File(...), 
+    current_user: User = Depends(get_current_user)
+):
     if current_user.role != "student":
         raise HTTPException(status_code=403, detail="Only students can submit assignments")
     
-    assignment = await db.assignments.find_one({"id": assignment_id})
-    if not assignment:
-        raise HTTPException(status_code=404, detail="Assignment not found")
-    
-    # Verify student is enrolled in the course
-    enrollment = await db.enrollments.find_one({"student_id": current_user.id, "course_id": assignment['course_id']})
-    if not enrollment:
-        raise HTTPException(status_code=403, detail="Not enrolled in this course")
-    
-    # Check if already submitted
-    existing = await db.submissions.find_one({"assignment_id": assignment_id, "student_id": current_user.id})
-    if existing:
-        raise HTTPException(status_code=400, detail="Assignment already submitted")
-    
-    submission_obj = Submission(
-        **submission_input.model_dump(),
-        assignment_id=assignment_id,
-        student_id=current_user.id,
-        student_name=current_user.name
-    )
-    
-    doc = submission_obj.model_dump()
-    doc['submitted_at'] = doc['submitted_at'].isoformat()
-    
-    await db.submissions.insert_one(doc)
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        
+        async with db.execute("SELECT * FROM assignments WHERE id = ?", (assignment_id,)) as cursor:
+            assignment = await cursor.fetchone()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        assignment_dict = dict(assignment)
+        
+        # Verify student is enrolled
+        async with db.execute("SELECT * FROM enrollments WHERE student_id = ? AND course_id = ?", (current_user.id, assignment_dict['course_id'])) as cursor:
+            enrollment = await cursor.fetchone()
+        if not enrollment:
+            raise HTTPException(status_code=403, detail="Not enrolled in this course")
+        
+        # Check if already submitted
+        async with db.execute("SELECT * FROM submissions WHERE assignment_id = ? AND student_id = ?", (assignment_id, current_user.id)) as cursor:
+            existing = await cursor.fetchone()
+        if existing:
+            raise HTTPException(status_code=400, detail="Assignment already submitted")
+        
+        # Save file
+        file_extension = Path(file.filename).suffix
+        new_filename = f"{assignment_id}_{current_user.id}{file_extension}"
+        file_path = UPLOADS_DIR / new_filename
+        
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        file_url = f"/uploads/{new_filename}"
+        
+        submission_obj = Submission(
+            assignment_id=assignment_id,
+            student_id=current_user.id,
+            student_name=current_user.name,
+            file_url=file_url
+        )
+        
+        await db.execute(
+            "INSERT INTO submissions (id, assignment_id, student_id, student_name, file_url, submitted_at, grade, feedback, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (submission_obj.id, submission_obj.assignment_id, submission_obj.student_id, submission_obj.student_name, submission_obj.file_url, submission_obj.submitted_at.isoformat(), submission_obj.grade, submission_obj.feedback, submission_obj.status)
+        )
+        await db.commit()
+        
     return submission_obj
 
 @api_router.get("/assignments/{assignment_id}/submissions", response_model=List[Submission])
-async def get_assignment_submissions(assignment_id: str, current_user: User = Depends(get_current_user)):
-    assignment = await db.assignments.find_one({"id": assignment_id})
-    if not assignment:
-        raise HTTPException(status_code=404, detail="Assignment not found")
-    
-    if current_user.role == "teacher":
-        # Verify it's their course
-        course = await db.courses.find_one({"id": assignment['course_id'], "teacher_id": current_user.id})
-        if not course:
-            raise HTTPException(status_code=403, detail="Not your assignment")
+async def get_submissions(assignment_id: str, current_user: User = Depends(get_current_user)):
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
         
-        submissions = await db.submissions.find({"assignment_id": assignment_id}, {"_id": 0}).to_list(1000)
-    else:
-        # Students can only see their own submission
-        submissions = await db.submissions.find({"assignment_id": assignment_id, "student_id": current_user.id}, {"_id": 0}).to_list(1000)
-    
+        async with db.execute("SELECT * FROM assignments WHERE id = ?", (assignment_id,)) as cursor:
+            assignment = await cursor.fetchone()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        assignment_dict = dict(assignment)
+        
+        # Check permissions
+        if current_user.role == "student":
+            async with db.execute("SELECT * FROM submissions WHERE assignment_id = ? AND student_id = ?", (assignment_id, current_user.id)) as cursor:
+                submissions = await cursor.fetchall()
+        elif current_user.role == "teacher":
+            # Verify teacher owns the course
+            async with db.execute("SELECT * FROM courses WHERE id = ? AND teacher_id = ?", (assignment_dict['course_id'], current_user.id)) as cursor:
+                course = await cursor.fetchone()
+            if not course:
+                raise HTTPException(status_code=403, detail="Not your course")
+            
+            async with db.execute("SELECT * FROM submissions WHERE assignment_id = ?", (assignment_id,)) as cursor:
+                submissions = await cursor.fetchall()
+        
+    result = []
     for submission in submissions:
-        if isinstance(submission.get('submitted_at'), str):
-            submission['submitted_at'] = datetime.fromisoformat(submission['submitted_at'])
+        s = dict(submission)
+        if isinstance(s.get('submitted_at'), str):
+            s['submitted_at'] = datetime.fromisoformat(s['submitted_at'])
+        result.append(Submission(**s))
     
-    return submissions
+    return result
 
 @api_router.put("/submissions/{submission_id}/grade", response_model=Submission)
-async def grade_submission(submission_id: str, grade_input: GradeSubmission, current_user: User = Depends(get_current_user)):
+async def grade_submission(
+    submission_id: str, 
+    grade_input: GradeSubmission, 
+    current_user: User = Depends(get_current_user)
+):
     if current_user.role != "teacher":
         raise HTTPException(status_code=403, detail="Only teachers can grade submissions")
     
-    submission = await db.submissions.find_one({"id": submission_id})
-    if not submission:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    
-    # Verify it's their assignment
-    assignment = await db.assignments.find_one({"id": submission['assignment_id']})
-    course = await db.courses.find_one({"id": assignment['course_id'], "teacher_id": current_user.id})
-    if not course:
-        raise HTTPException(status_code=403, detail="Not your assignment")
-    
-    # Validate grade
-    if grade_input.grade < 0 or grade_input.grade > assignment['total_points']:
-        raise HTTPException(status_code=400, detail=f"Grade must be between 0 and {assignment['total_points']}")
-    
-    # Update submission
-    await db.submissions.update_one(
-        {"id": submission_id},
-        {"$set": {"grade": grade_input.grade, "feedback": grade_input.feedback, "status": "graded"}}
-    )
-    
-    updated_submission = await db.submissions.find_one({"id": submission_id}, {"_id": 0})
-    
-    if isinstance(updated_submission.get('submitted_at'), str):
-        updated_submission['submitted_at'] = datetime.fromisoformat(updated_submission['submitted_at'])
-    
-    return Submission(**updated_submission)
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        
+        async with db.execute("SELECT * FROM submissions WHERE id = ?", (submission_id,)) as cursor:
+            submission = await cursor.fetchone()
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        
+        submission_dict = dict(submission)
+        
+        # Verify teacher owns the course
+        async with db.execute("SELECT * FROM assignments WHERE id = ?", (submission_dict['assignment_id'],)) as cursor:
+            assignment = await cursor.fetchone()
+        assignment_dict = dict(assignment)
+        
+        async with db.execute("SELECT * FROM courses WHERE id = ? AND teacher_id = ?", (assignment_dict['course_id'], current_user.id)) as cursor:
+            course = await cursor.fetchone()
+        if not course:
+            raise HTTPException(status_code=403, detail="Not your course")
+        
+        # Validate grade
+        if grade_input.grade < 0 or grade_input.grade > assignment_dict['total_points']:
+            raise HTTPException(status_code=400, detail="Invalid grade")
+        
+        await db.execute(
+            "UPDATE submissions SET grade = ?, feedback = ?, status = ? WHERE id = ?",
+            (grade_input.grade, grade_input.feedback, "graded", submission_id)
+        )
+        await db.commit()
+        
+        async with db.execute("SELECT * FROM submissions WHERE id = ?", (submission_id,)) as cursor:
+            updated_submission = await cursor.fetchone()
+            
+    s = dict(updated_submission)
+    if isinstance(s.get('submitted_at'), str):
+        s['submitted_at'] = datetime.fromisoformat(s['submitted_at'])
+        
+    return Submission(**s)
 
-# Include router
+
+
+
+@api_router.delete("/courses/{course_id}")
+async def delete_course(course_id: str, current_user: User = Depends(get_current_user)):
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can delete courses")
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        # Verify course ownership
+        async with db.execute("SELECT * FROM courses WHERE id = ? AND teacher_id = ?", (course_id, current_user.id)) as cursor:
+            course = await cursor.fetchone()
+        
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found or you don't have permission")
+        
+        # Delete course and related data
+        
+        async with db.execute("SELECT id FROM assignments WHERE course_id = ?", (course_id,)) as cursor:
+            assignments = await cursor.fetchall()
+            assignment_ids = [a['id'] for a in assignments]
+        
+        if assignment_ids:
+            placeholders = ','.join('?' * len(assignment_ids))
+            await db.execute(f"DELETE FROM submissions WHERE assignment_id IN ({placeholders})", assignment_ids)
+            await db.execute(f"DELETE FROM assignments WHERE course_id = ?", (course_id,))
+            
+        await db.execute("DELETE FROM enrollments WHERE course_id = ?", (course_id,))
+        await db.execute("DELETE FROM courses WHERE id = ?", (course_id,))
+        await db.commit()
+    
+    return {"message": "Course deleted successfully"}
+
+@api_router.delete("/assignments/{assignment_id}")
+async def delete_assignment(assignment_id: str, current_user: User = Depends(get_current_user)):
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can delete assignments")
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        
+        # Verify assignment and course ownership
+        async with db.execute("""
+            SELECT a.*, c.teacher_id 
+            FROM assignments a 
+            JOIN courses c ON a.course_id = c.id 
+            WHERE a.id = ?
+        """, (assignment_id,)) as cursor:
+            result = await cursor.fetchone()
+            
+        if not result:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+            
+        if result['teacher_id'] != current_user.id:
+            raise HTTPException(status_code=403, detail="You don't have permission to delete this assignment")
+            
+        # Delete assignment and its submissions
+        await db.execute("DELETE FROM submissions WHERE assignment_id = ?", (assignment_id,))
+        await db.execute("DELETE FROM assignments WHERE id = ?", (assignment_id,))
+        await db.commit()
+        
+    return {"message": "Assignment deleted successfully"}
+
+@api_router.delete("/courses/{course_id}/enroll")
+async def unenroll_course(course_id: str, current_user: User = Depends(get_current_user)):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can unenroll from courses")
+        
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        
+        await db.execute(
+            "DELETE FROM enrollments WHERE student_id = ? AND course_id = ?",
+            (current_user.id, course_id)
+        )
+        await db.commit()
+        
+    return {"message": "Unenrolled successfully"}
+
+@api_router.get("/courses/{course_id}/students", response_model=List[UserBase])
+async def get_course_students(course_id: str, current_user: User = Depends(get_current_user)):
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can view enrolled students")
+        
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        
+        # Verify course ownership
+        async with db.execute("SELECT * FROM courses WHERE id = ? AND teacher_id = ?", (course_id, current_user.id)) as cursor:
+            course = await cursor.fetchone()
+            
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found or you don't have permission")
+            
+        async with db.execute("""
+            SELECT u.email, u.name, u.role
+            FROM users u
+            JOIN enrollments e ON u.id = e.student_id
+            WHERE e.course_id = ?
+        """, (course_id,)) as cursor:
+            students = await cursor.fetchall()
+            
+    return [UserBase(email=s['email'], name=s['name'], role=s['role']) for s in students]
+
 app.include_router(api_router)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()

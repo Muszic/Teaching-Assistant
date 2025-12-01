@@ -9,7 +9,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { toast } from "sonner";
 import { BookOpen, Loader2, GraduationCap, User } from "lucide-react";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8001";
 const API = `${BACKEND_URL}/api`;
 
 const Register = ({ onLogin }) => {
@@ -37,10 +37,10 @@ const Register = ({ onLogin }) => {
     try {
       const response = await axios.post(`${API}/auth/register`, formData);
       const { access_token, user } = response.data;
-      
+
       onLogin(access_token, user);
       toast.success(`Account created successfully! Welcome, ${user.name}!`);
-      
+
       if (user.role === "teacher") {
         navigate("/teacher");
       } else {
@@ -62,7 +62,7 @@ const Register = ({ onLogin }) => {
               <BookOpen className="w-9 h-9 text-white" />
             </div>
           </div>
-          <CardTitle className="text-3xl font-bold" style={{fontFamily: 'Space Grotesk, sans-serif'}}>Create Account</CardTitle>
+          <CardTitle className="text-3xl font-bold" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>Create Account</CardTitle>
           <CardDescription className="text-base">Join TG-TAS and start your journey</CardDescription>
         </CardHeader>
         <CardContent>

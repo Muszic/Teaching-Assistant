@@ -15,7 +15,7 @@ function App() {
     // Check if user is logged in
     const token = localStorage.getItem("token");
     const userData = localStorage.getItem("user");
-    
+
     if (token && userData) {
       setUser(JSON.parse(userData));
     }
@@ -26,6 +26,11 @@ function App() {
     localStorage.setItem("token", token);
     localStorage.setItem("user", JSON.stringify(userData));
     setUser(userData);
+  };
+
+  const handleUserUpdate = (updatedUser) => {
+    localStorage.setItem("user", JSON.stringify(updatedUser));
+    setUser(updatedUser);
   };
 
   const handleLogout = () => {
@@ -50,13 +55,13 @@ function App() {
         <Route path="/" element={!user ? <LandingPage /> : <Navigate to={user.role === "teacher" ? "/teacher" : "/student"} />} />
         <Route path="/login" element={!user ? <Login onLogin={handleLogin} /> : <Navigate to={user.role === "teacher" ? "/teacher" : "/student"} />} />
         <Route path="/register" element={!user ? <Register onLogin={handleLogin} /> : <Navigate to={user.role === "teacher" ? "/teacher" : "/student"} />} />
-        <Route 
-          path="/teacher" 
-          element={user && user.role === "teacher" ? <TeacherDashboard user={user} onLogout={handleLogout} /> : <Navigate to="/login" />} 
+        <Route
+          path="/teacher"
+          element={user && user.role === "teacher" ? <TeacherDashboard user={user} onLogout={handleLogout} onUserUpdate={handleUserUpdate} /> : <Navigate to="/login" />}
         />
-        <Route 
-          path="/student" 
-          element={user && user.role === "student" ? <StudentDashboard user={user} onLogout={handleLogout} /> : <Navigate to="/login" />} 
+        <Route
+          path="/student"
+          element={user && user.role === "student" ? <StudentDashboard user={user} onLogout={handleLogout} onUserUpdate={handleUserUpdate} /> : <Navigate to="/login" />}
         />
       </Routes>
     </BrowserRouter>

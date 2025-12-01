@@ -1,10 +1,10 @@
 # TG-TAS: Teaching Assistant System
 
-A comprehensive educational platform for managing courses, assignments, and student submissions. Built with FastAPI, React, and MongoDB.
+A comprehensive educational platform for managing courses, assignments, and student submissions. Built with FastAPI, React, and SQLite.
 
-## 🎯 Overview
+## Overview
 
-TG-TAS is a mid-level working prototype that enables teachers to create courses and assignments, while students can enroll in courses, submit assignments, and receive grades with feedback.
+TG-TAS is a working prototype that enables teachers to create courses and assignments, while students can enroll in courses, submit assignments, and receive grades with feedback.
 
 ### Key Features
 
@@ -18,219 +18,138 @@ TG-TAS is a mid-level working prototype that enables teachers to create courses 
 **For Students:**
 - Browse and enroll in available courses
 - View course assignments
-- Submit assignments (mock file upload)
+- Submit assignments (file upload)
 - View grades and teacher feedback
 - Track submission status
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 - **Backend:** FastAPI (Python)
-- **Frontend:** React 19
-- **Database:** MongoDB
+- **Frontend:** React
+- **Database:** SQLite
 - **Authentication:** JWT (JSON Web Tokens)
-- **UI Components:** Shadcn UI + Tailwind CSS
-- **Fonts:** Space Grotesk, Inter
+- **UI Components:** Tailwind CSS
 
-## 📋 Prerequisites
+## Prerequisites
 
 - Python 3.8+
-- Node.js 16+
-- MongoDB
-- yarn package manager
+- Node.js and npm
 
-## 🚀 Setup Instructions
+## Setup Instructions
 
-### 1. Database Setup
+### 1. Backend Setup
 
-MongoDB is already running locally. The database `tg_tas_db` will be created automatically on first use.
-
-**Collections created automatically:**
-- `users` - User accounts (teachers and students)
-- `courses` - Course information
-- `enrollments` - Student course enrollments
-- `assignments` - Course assignments
-- `submissions` - Assignment submissions with grades
-
-### 2. Backend Setup
+It is recommended to use a virtual environment.
 
 ```bash
-# Navigate to backend directory
-cd /app/backend
+# Navigate to project root
+cd Teaching-Assistant
 
-# Install Python dependencies
-pip install -r requirements.txt
+# Create virtual environment
+python -m venv .venv
 
-# The backend runs automatically via supervisor
-# To restart manually:
-sudo supervisorctl restart backend
+# Activate virtual environment
+# Windows:
+.\.venv\Scripts\Activate
+# Mac/Linux:
+source .venv/bin/activate
 
-# View backend logs:
-tail -f /var/log/supervisor/backend.*.log
+# Install dependencies
+pip install -r backend/requirements.txt
+
+# Start the server
+python backend/server.py
 ```
 
-**Backend runs on:** `http://0.0.0.0:8001` (internal)
+The backend runs on `http://localhost:8001`.
 
-**Environment variables** (configured in `/app/backend/.env`):
-```
-MONGO_URL=mongodb://localhost:27017
-DB_NAME=tg_tas_db
-JWT_SECRET=tg-tas-secret-key-change-in-production-12345
-CORS_ORIGINS=*
-```
-
-### 3. Frontend Setup
+### 2. Frontend Setup
 
 ```bash
 # Navigate to frontend directory
-cd /app/frontend
+cd frontend
 
 # Install dependencies
-yarn install
+npm install
 
-# The frontend runs automatically via supervisor
-# To restart manually:
-sudo supervisorctl restart frontend
+# Start the development server
+npm start
 ```
 
-**Frontend runs on:** `http://0.0.0.0:3000` (internal)
+The frontend runs on `http://localhost:3000` (or 3002 if 3000 is busy).
 
-## 📡 API Endpoints
+## API Endpoints
 
 ### Authentication
-- `POST /api/auth/register` - Register new user (teacher/student)
-- `POST /api/auth/login` - Login and get JWT token
+- `POST /api/auth/register` - Register new user
+- `POST /api/auth/login` - Login
 - `GET /api/auth/me` - Get current user info
 
 ### Courses
-- `POST /api/courses` - Create course (teacher only)
-- `GET /api/courses` - Get all courses
-- `GET /api/courses/{course_id}` - Get specific course
-- `POST /api/courses/{course_id}/enroll` - Enroll in course (student only)
-- `GET /api/courses/enrolled/my` - Get enrolled courses (student only)
+- `POST /api/courses` - Create course (Teacher)
+- `GET /api/courses` - List courses
+- `POST /api/courses/{course_id}/enroll` - Enroll (Student)
 
 ### Assignments
-- `POST /api/assignments` - Create assignment (teacher only)
-- `GET /api/courses/{course_id}/assignments` - Get course assignments
+- `POST /api/assignments` - Create assignment (Teacher)
+- `GET /api/courses/{course_id}/assignments` - List assignments
 
 ### Submissions
-- `POST /api/assignments/{assignment_id}/submit` - Submit assignment (student only)
-- `GET /api/assignments/{assignment_id}/submissions` - Get submissions
-- `PUT /api/submissions/{submission_id}/grade` - Grade submission (teacher only)
+- `POST /api/assignments/{assignment_id}/submit` - Submit assignment (Student)
+- `PUT /api/submissions/{submission_id}/grade` - Grade submission (Teacher)
 
-## 🔐 Authentication
+## Authentication
 
-The system uses JWT token-based authentication:
+The system uses JWT token-based authentication.
+1. User registers/logs in.
+2. Server returns a JWT token.
+3. Token is stored in the frontend.
+4. Token is sent in the `Authorization` header for protected requests.
 
-1. User registers with email, password, name, and role (teacher/student)
-2. On successful registration/login, receive JWT token
-3. Token is stored in localStorage
-4. All API requests include token in Authorization header: `Bearer {token}`
-5. Token expires after 24 hours
-
-## 📝 Assignment Lifecycle
-
-1. **Teacher creates course** → Course appears in student's browse list
-2. **Student enrolls** → Course added to "My Assignments" tab
-3. **Teacher creates assignment** → Assignment visible to enrolled students
-4. **Student submits** → Mock file path stored (e.g., "s3://mock/assignment.pdf")
-5. **Teacher grades** → Grade and feedback provided
-6. **Student views results** → Grade and feedback displayed
-
-## 🎨 UI/UX Design
-
-- Clean, professional educational platform aesthetic
-- Soft blue and indigo color palette
-- Modern Space Grotesk font for headings
-- Inter font for body text
-- Responsive design for all screen sizes
-- Smooth animations and transitions
-- Glass-morphism effects for depth
-- Clear visual hierarchy
-
-## 🧪 Testing
-
-The system includes comprehensive test coverage:
-
-- User registration and authentication
-- Course creation and management
-- Assignment lifecycle
-- Submission and grading flow
-- Protected routes and role-based access
-- Form validations
-
-**Test results:** 95% success rate (all major features working)
-
-## 📁 Project Structure
+## Project Structure
 
 ```
-/app/
+Teaching-Assistant/
 ├── backend/
-│   ├── server.py              # FastAPI application
-│   ├── requirements.txt       # Python dependencies
-│   └── .env                   # Environment variables
+│   ├── server.py           # Main application logic
+│   ├── requirements.txt    # Python dependencies
+│   ├── test_cfg_functions.py # Unit tests
+│   └── uploads/            # Stored assignment files
 │
 ├── frontend/
-│   ├── public/               # Static assets
-│   ├── src/
-│   │   ├── App.js           # Main React component
-│   │   ├── App.css          # Global styles
-│   │   └── components/
-│   │       ├── LandingPage.js
-│   │       ├── Login.js
-│   │       ├── Register.js
-│   │       ├── TeacherDashboard.js
-│   │       ├── StudentDashboard.js
-│   │       └── ui/          # Shadcn UI components
-│   ├── package.json         # Node dependencies
-│   └── .env                 # Environment variables
+│   ├── src/                # React source code
+│   ├── public/             # Static assets
+│   └── package.json        # Node dependencies
 │
-└── README.md                # This file
+└── README.md               # Project documentation
 ```
 
-## 🔒 Security Notes
+## Testing
 
-- Passwords are hashed using bcrypt
-- JWT tokens expire after 24 hours
-- CORS is configured for cross-origin requests
-- Role-based access control for all protected routes
-- Input validation on all forms
+The project includes unit tests for the backend.
 
-**⚠️ For Production:**
-- Change JWT_SECRET to a secure random string
-- Configure proper CORS origins
-- Enable HTTPS
-- Add rate limiting
-- Implement refresh tokens
-- Add comprehensive logging
+```bash
+# Run all tests
+python backend/test_cfg_functions.py
+```
 
-## 🎯 Scope and Limitations
+## License
 
-**Included:**
-- Core assignment lifecycle (create → submit → grade → view)
-- Two user roles (Teacher and Student)
-- JWT authentication
-- Course and assignment management
-- Basic enrollment system
+Educational prototype.
 
-**Not Included (as per prototype scope):**
-- Real file uploads (using mock text strings)
-- Administrator or TA roles
-- Real-time features (WebSockets, live sessions)
-- Cloud storage integration (AWS S3)
-- Advanced performance optimization
-- Accessibility compliance (WCAG)
+## Screenshots
 
-## 📞 Support
+### Dashboard
+![Dashboard](assets/pic-1.png)
 
-For issues or questions:
-1. Check backend logs: `tail -f /var/log/supervisor/backend.*.log`
-2. Check frontend logs: `tail -f /var/log/supervisor/frontend.*.log`
-3. Restart services: `sudo supervisorctl restart backend frontend`
+### Course View
+![Course View](assets/pic-2.png)
 
-## 📄 License
+### Assignment Details
+![Assignment Details](assets/pic-3.png)
 
-Educational prototype - 2025
+### Submission Interface
+![Submission Interface](assets/pic-4.png)
 
----
-
-**Built with ❤️ using Emergent AI**
+### Grading View
+![Grading View](assets/pic-5.png)

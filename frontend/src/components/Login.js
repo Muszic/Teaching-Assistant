@@ -8,8 +8,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { toast } from "sonner";
 import { BookOpen, Loader2 } from "lucide-react";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8001";
 const API = `${BACKEND_URL}/api`;
+console.log("Login API URL:", API);
 
 const Login = ({ onLogin }) => {
   const navigate = useNavigate();
@@ -30,17 +31,22 @@ const Login = ({ onLogin }) => {
     try {
       const response = await axios.post(`${API}/auth/login`, formData);
       const { access_token, user } = response.data;
-      
+
       onLogin(access_token, user);
       toast.success(`Welcome back, ${user.name}!`);
-      
+
       if (user.role === "teacher") {
         navigate("/teacher");
       } else {
         navigate("/student");
       }
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Login failed. Please check your credentials.");
+      console.error("Login error:", error);
+      if (error.response && error.response.status === 401) {
+        toast.error("Incorrect password or email");
+      } else {
+        toast.error(error.response?.data?.detail || "Login failed. Please check your credentials.");
+      }
     } finally {
       setLoading(false);
     }
@@ -55,7 +61,7 @@ const Login = ({ onLogin }) => {
               <BookOpen className="w-9 h-9 text-white" />
             </div>
           </div>
-          <CardTitle className="text-3xl font-bold" style={{fontFamily: 'Space Grotesk, sans-serif'}}>Welcome Back</CardTitle>
+          <CardTitle className="text-3xl font-bold" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>Welcome Back</CardTitle>
           <CardDescription className="text-base">Sign in to your TG-TAS account</CardDescription>
         </CardHeader>
         <CardContent>
